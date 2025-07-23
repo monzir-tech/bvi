@@ -1,0 +1,482 @@
+#!/usr/bin/env bash
+
+###################################
+KEY_DEL_CODE=255
+
+###################################
+
+################################
+EDITOR_NAME="bvi"
+EDITOR_VERSION='1.0'
+################################
+
+
+FILE_NAME=${1:-untitled.txt}
+TMP_FILE=$(mktemp)
+IS_MODIFIED=false
+
+CUR_LINE=0
+CUR_CHAR=0
+SCROLL_Y=0
+SCROLL_X=0
+
+declare -a FILE_LINES=( )
+
+
+if [[ -f "$FILE_NAME" ]]; then
+  mapfile -t FILE_LINES < "$FILE_NAME"
+else
+  FILE_LINES=("")
+fi
+
+####################################### Utils Functions
+TERM_ROWS=
+TERM_COLS=
+function get_term_size(){
+    [[ $(tty) == "not a tty" ]] && echo "Standard input is not a terminal" &&  quit
+    TERM_ROWS=$(echo $(stty size) | cut -d' ' -f1)
+    TERM_COLS=$(echo $(stty size) | cut -d' ' -f2)
+}
+
+
+function move_cursor_to(){
+    printf "\e[%s;%sH" "$1" "$2"
+}
+function clear_line(){
+    if [[ -n "$1" ]] ; then
+        move_cursor_to "$1"
+    fi
+    printf "\e[K"
+}
+function enable_screen_buffer(){
+    printf "\e[?1049h"
+}
+function disable_screen_buffer(){
+    printf "\e[?1049l"
+}
+####################################### Configrations Functions
+# set -ex
+trap "on_crash" ERR
+trap "on_crash" INT
+trap "on_exit" EXIT
+
+function on_crash(){
+    
+    echo "Something went wrong on line $LINENO" > "./.${EDITOR_NAME}.log"
+    exit 1
+}
+
+function on_exit(){
+    disable_screen_buffer
+    set_color "reset"
+    stty sane
+
+}
+
+
+function config(){
+    enable_screen_buffer
+    stty raw intr undef -echo -icanon
+}
+####################################### Editing Functions
+
+function save(){
+    local i
+    printf "%s" "" > "$FILE_NAME"
+    
+    for i in "${!FILE_LINES[@]}"; do
+        printf "%s\n" "${FILE_LINES[$i]}" >> "$FILE_NAME"
+    done
+    print_info 'File' 'Saved'
+    IS_MODIFIED=
+}
+
+function quit(){
+    exit
+}
+
+function inschar (){
+    local ord=$1
+    local char=$2
+    local line="${FILE_LINES[$CUR_LINE]}"
+    local line_pre=${line[@]::$CUR_CHAR}
+    local line_suf=${line[@]:$CUR_CHAR}
+
+    local lines_pre=${FILE_LINES[@]::$CUR_LINE}
+    local lines_suf=${FILE_LINES[@]:$CUR_LINE}
+    
+
+
+    put_char(){
+        FILE_LINES[$CUR_LINE]="${line_pre}${char}${line_suf}"
+        ((CUR_CHAR++))
+    }
+    addline(){
+        local i
+        local tmp=( "${FILE_LINES[@]}" )
+        local tmp_l="${FILE_LINES[$CUR_LINE]}"
+        ################ add line
+        (( i = $CUR_LINE ))
+        FILE_LINES=( "${tmp[@]::$i}" )
+        FILE_LINES+=( "" )
+        FILE_LINES+=( "${tmp[@]:$i:}" )
+        ################ edite current line
+        [[ $CUR_CHAR -gt 0 ]] &&  FILE_LINES[$i]="${tmp_l::$CUR_CHAR}"
+        (( i++ ))
+        FILE_LINES[$i]="${tmp_l:$CUR_CHAR:}"
+        ################ reset cursor
+        (( CUR_LINE++))
+        (( CUR_CHAR = 0))
+    }
+
+    delline(){
+        local i l
+        local tmp=( "${FILE_LINES[@]}" )
+
+        if (( CUR_LINE > 0 )) ;then
+            (( i = $CUR_LINE ))
+            FILE_LINES=( "${tmp[@]::$i}" )
+            (( i ++))
+            FILE_LINES+=( "${tmp[@]:$i:}" )
+            ################ reset cursor
+            (( CUR_LINE--))
+            l="${FILE_LINES[$CUR_LINE]}"
+            (( CUR_CHAR = ${#l} ))
+        fi
+    }
+    backspace(){
+        if (( CUR_CHAR == 0 )); then
+            delline
+        else
+            ((CUR_CHAR--))
+            FILE_LINES[$CUR_LINE]="${line_pre[@]::-1}${line_suf}"
+        fi
+    }
+    del(){
+        if (( CUR_CHAR == ${#line[@]} )); then
+            ##### TODO
+            echo "TODO"
+            # delline
+        else
+            FILE_LINES[$CUR_LINE]="${line_pre[@]}${line_suf:1:}"
+        fi
+    }
+
+    case "$ord" in
+        0 | 10 )
+            addline 
+            ;;
+        127) # Back space 
+            backspace
+        ;;
+        $KEY_DEL_CODE) 
+            del
+        ;;
+        20)
+            addline
+            ;;
+        *)
+            put_char $char
+        ;;
+    esac
+    
+    [[ $CUR_CHAR -lt 0 ]] && (( CUR_CHAR = 0 ))
+    (( IS_MODIFIED = true ))
+}
+
+function scroll_up(){
+    if [[ $SCROLL_Y -gt 0 ]]; then
+        (( SCROLL_Y-- ))
+    fi
+}
+function scroll_down(){
+    (( page_y = BODY_LENGTH + SCROLL_Y ))
+    if [[ $page_y -lt ${#FILE_LINES[@]} ]]; then
+        (( SCROLL_Y-- ))
+    fi
+}
+function scroll_left(){
+    if [[ $SCROLL_X -gt 0 ]]; then
+        (( SCROLL_X-- ))
+    fi
+}
+function scroll_right(){
+    (( page_x =  TERM_COLS + SCROLL_X ))
+    if [[ $page_x -lt ${#FILE_LINES[$CUR_LINE]} ]]; then
+        (( SCROLL_X++))
+    fi
+}
+CX_OF=1
+function update_cursor(){
+    local cx 
+    local cy 
+    local ll=${#FILE_LINES[$CUR_LINE]}
+    
+    (( CUR_CHAR >= ll )) && (( cx = ll + CX_OF )) || (( cx = CUR_CHAR + CX_OF ))
+
+    (( cy = CUR_LINE + BODY_START ))
+
+    move_cursor_to $cy $cx
+}
+function hide_cursor (){
+    printf "\e[?25l"
+}
+function show_cursor (){
+    printf "\e[?25h"
+}
+####################################### Graphic Functions
+function get_rgb(){
+    [[ "$1" == "bg"  ]] && ( printf "\e[48;2;${2};${3};${4}m" )
+    [[ "$1" == "fg"  ]] && ( printf "\e[38;2;${2};${3};${4}m" )
+}
+function set_color(){
+    local colors=""
+    local d
+    
+
+    for c in "${@:1}"; do
+        d="fg"
+        [[ "${c::3}" == "bg-"  ]] && c="${c:3}"  &&  d="bg" 
+        [[ "${c::3}" == "fg-"  ]] && c="${c:3}"  &&  d="fg" 
+
+        case "${c}" in
+            "reset")
+                colors+="\e[0m"
+                ;;
+            
+            "white")
+                colors+=$(get_rgb "${d}" 230 230 230 )
+                ;;
+            "gray")
+                colors+=$(get_rgb "${d}" 100 100 100 )
+                ;;
+            "darkgray")
+                colors+=$(get_rgb "${d}" 10 10 10 )
+                ;;
+            "red")
+                colors+=$(get_rgb "${d}" 100 0 0 )
+                ;;
+            "orange")
+                colors+=$(get_rgb "${d}" 170 100 0 )
+                ;;
+            "darkorange")
+                colors+=$(get_rgb "${d}" 100 50 0 )
+                ;;
+            "black")
+                colors+="\e[30m"
+                ;;
+        esac
+    done
+    [[ -n $colors ]] && printf "${colors}"
+}
+
+EDITOR_HEADER_HEIGHT=1
+function draw_editor_header(){
+    #########################################
+    # draw header
+    move_cursor_to 1
+    set_color "bg-gray" "black"
+    clear_line
+
+    (( HALF_LINE = TERM_COLS / 2 ))
+    printf "\tGNU $EDITOR_NAME $EDITOR_VERSION "
+    move_cursor_to 0 $HALF_LINE
+
+    [[ -n $IS_MODIFIED ]] && printf "*$FILE_NAME\n" ||  printf "$FILE_NAME\n"
+    set_color "reset"
+}
+BODY_LENGTH=
+BODY_START=
+function draw_editor_body(){
+    local i
+    #########################################
+    # draw file
+    (( BODY_LENGTH = TERM_ROWS - EDITOR_HEADER_HEIGHT - EDITOR_FOOTER_HEIGHT  ))
+    (( BODY_START  = EDITOR_HEADER_HEIGHT + 1))
+    move_cursor_to $BODY_START 0
+
+    for (( lineNum = 1 ; lineNum < $BODY_LENGTH; lineNum++ ));do
+        get_rgb "bg" 30 30 30
+        get_rgb "fg" 220 220 220
+
+        clear_line
+
+        (( i = lineNum - 1 ))
+
+        if (( i < ${#FILE_LINES[@]} ));then
+            ########### Hilight current line
+            (( i == CUR_LINE )) &&  get_rgb "bg" 40 40 40
+            clear_line 
+            printf "%s" "${FILE_LINES[$i]}"
+            set_color "reset"
+        fi
+        printf "\n\r"
+    done
+    update_cursor
+}
+
+EDITOR_FOOTER_HEIGHT=2
+function draw_editor_footer(){
+    local COMMANDS
+    COMMANDS=( 
+        $'\e[100m ^Q \e[0m Exit ' 
+        $'\e[100m ^S \e[0m Save '
+    )
+    
+    #########################################
+    # draw footer
+    (( bottom  = TERM_ROWS - EDITOR_FOOTER_HEIGHT ))
+    move_cursor_to  "$bottom" # goto last line
+    set_color "bg-gray" 
+    clear_line 
+    set_color "reset"
+    printf "\n%s %s" "[Editing: $FILE_NAME]" "${COMMANDS[*]}"
+}
+function print_info(){
+    #########################################
+    # draw footer
+    (( bottom  = TERM_ROWS - EDITOR_FOOTER_HEIGHT ))
+    move_cursor_to  $bottom # goto last line
+    set_color "bg-gray" 
+    clear_line
+    printf "$1 : $2"
+    set_color "reset"
+}
+
+function draw_editor(){ 
+    get_term_size
+
+    clear
+    draw_editor_header
+    draw_editor_body
+    draw_editor_footer
+}
+
+####################################### Keyboard Functions
+
+function hundle_crtl_key(){
+    local key
+    key=$1
+
+    case "${key}" in
+        19) # CTRL+S
+            save
+        ;;
+        17) # CTRL+Q
+            quit
+        ;;
+        3) # CTRL+C
+            print_info "[clipad]" "coping..."
+        ;;
+        16) # CTRL+P
+            print_info "[clipad]" "Past..."
+        ;;
+    esac
+}
+
+function hundle_esc_key(){
+    move_up(){
+        [ $CUR_LINE -gt 0 ]  &&  (( CUR_LINE-- ))
+    }
+    move_down(){
+        (( (CUR_LINE + 1) < ${#FILE_LINES[@]} ))  &&  (( CUR_LINE++ ))
+    }
+    move_right(){
+        if (( CUR_CHAR >= ${#FILE_LINES[CUR_LINE]} )); then
+            (( (CUR_LINE + 1) <  ${#FILE_LINES[@]} )) && (( CUR_LINE++ )) && (( CUR_CHAR = 0))
+        else
+            (( CUR_CHAR ++ ))
+        fi
+
+    }
+    move_left(){
+        (( ll = ${#FILE_LINES[$CUR_LINE]} ))
+
+        (( CUR_CHAR > ll )) && (( CUR_CHAR = ll ))
+
+        if (( CUR_CHAR <= 0 )); then
+            (( CUR_LINE > 0)) && (( CUR_LINE-- )) && (( CUR_CHAR = ${#FILE_LINES[$CUR_LINE]} ))
+        else
+            (( CUR_CHAR -- ))
+        fi
+    }
+    local key
+    IFS= read -rsn3 -t 0.005 key
+    print_info "esape key" "$key"
+    case "${key}" in
+        ##### UP
+        '[A')
+            move_up
+            ;;
+        ##### Down
+        '[B')
+            move_down
+            ;;
+        ##### Right
+        '[C') 
+            move_right
+        ;;
+        ##### Left
+        '[D') 
+            move_left
+        ;;
+        ##############################
+        ##### Delete
+        '[3~')
+            inschar "$KEY_DEL_CODE" "DEL"
+            ;;
+        '[1~')  ;;
+    esac
+
+
+    update_cursor
+}
+
+
+function hundle_key(){
+    local key
+
+    #################
+
+    IFS= read -rsn1 key
+    printf -v ord "%d" "'$key"
+
+    if (( ord >= 32 && ord < 128 ));then
+        inschar "$ord" "$key"
+    fi
+
+    if (( ord == 0 )) ; then  
+        inschar 10 '\n'
+    elif (( ord == 9 )) ; then 
+        inschar 9 '\t' 
+    elif (( ord > 0 && ord <= 26 )) ; then  
+        hundle_crtl_key "$ord" "$key"
+    fi
+
+    if [[ $key == $'\e' ]] ; then
+        hundle_esc_key
+    fi    
+}
+
+
+#################  Main Loop  ###################### 
+function main(){
+
+    draw_editor
+
+    while true; do
+        #########################
+        # Update cursor pos
+
+        hide_cursor
+        draw_editor_body
+        show_cursor
+        #########################
+        hundle_key 
+    done
+}
+
+
+config
+main
+quit
